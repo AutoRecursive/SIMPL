@@ -111,7 +111,8 @@ class Loader:
             self.print('-- {} {}'.format(subnet, numelem))
 
         if self.resume:
-            model.load_state_dict(self.ckpt["state_dict"])
+            # Load pretrained model, allowing for missing keys (for RL with Value Head)
+            self.load_pretrain_model(model, self.ckpt["state_dict"])
 
         if self.is_ddp:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(self.device)  # SyncBN
@@ -143,7 +144,12 @@ class Loader:
         optimizer = Optimizer(model, opt_cfg)
 
         if self.resume:
-            optimizer.load_state_dict(self.ckpt["opt_state"])
+            try:
+                optimizer.load_state_dict(self.ckpt["opt_state"])
+                self.print("[Loader] Successfully loaded optimizer state.")
+            except Exception as e:
+                self.print(f"[Loader] Warning: Failed to load optimizer state: {e}")
+                self.print("[Loader] Initializing optimizer from scratch.")
 
         return optimizer
 
@@ -153,6 +159,27 @@ class Loader:
 
         evaluator = getattr(import_module(eval_file), eval_name)(eval_cfg)
         return evaluator
+
+    def load_pretrain_model(self, model, pretrain_dict):
+        """
+        Load pretrained model, allowing for missing keys (for RL with Value Head)
+        """
+        model_dict = model.state_dict()
+
+        # Filter out unnecessary keys
+        filtered_dict = {k: v for k, v in pretrain_dict.items() if k in model_dict}
+
+        # Check for missing keys
+        missing_keys = [k for k in model_dict.keys() if k not in pretrain_dict]
+        if missing_keys:
+            self.print(f"[Loader] Warning: Missing keys in pretrained model: {missing_keys}")
+            self.print(f"[Loader] These parameters will be initialized randomly.")
+
+        # Update model state dict
+        model_dict.update(filtered_dict)
+        model.load_state_dict(model_dict)
+
+        self.print(f"[Loader] Successfully loaded pretrained model with {len(filtered_dict)} matching keys.")
 
     def network_name(self):
         _, net_name = self.adv_cfg.get_net_cfg()['network'].split(':')

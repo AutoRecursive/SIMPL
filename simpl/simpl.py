@@ -12,6 +12,7 @@ from torch.nn import functional as F
 from torch.nn import MultiheadAttention
 
 from utils.utils import gpu, init_weights
+from simpl.rl_module import ValueHead
 
 
 class Conv1d(nn.Module):
@@ -571,7 +572,9 @@ class Simpl(nn.Module):
     def __init__(self, cfg, device):
         super(Simpl, self).__init__()
         self.device = device
+        self.cfg = cfg
 
+        # Original network components
         self.actor_net = ActorNet(n_in=cfg['in_actor'],
                                   hidden_size=cfg['d_actor'],
                                   n_fpn_scale=cfg['n_fpn_scale'])
@@ -587,6 +590,15 @@ class Simpl(nn.Module):
         self.pred_net = MLPDecoder(device=self.device,
                                    config=cfg)
 
+        # RL components
+        self.use_rl = cfg.get('use_rl', False)
+        if self.use_rl:
+            self.value_head = ValueHead(
+                input_dim=cfg['d_embed'],
+                hidden_dim=cfg.get('ppo_value_hidden_dim', 128),
+                dropout=cfg.get('ppo_dropout', 0.1)
+            ).to(device)
+
         if cfg["init_weights"]:
             self.apply(init_weights)
 
@@ -598,10 +610,21 @@ class Simpl(nn.Module):
         lanes = self.lane_net(lanes)  # output: [N_{lane}, 128]
         # * fusion
         actors, lanes, _ = self.fusion_net(actors, actor_idcs, lanes, lane_idcs, rpe)
+
         # * decoding
         out = self.pred_net(actors, actor_idcs)
 
-        return out
+        # * Value network (for RL)
+        values = None
+        if self.use_rl:
+            # Compute value function for prediction outputs
+            values = self.value_head(actors, out)
+
+        if self.use_rl:
+            # Add values to output
+            return out, values
+        else:
+            return out
 
     def pre_process(self, data):
         '''
@@ -623,8 +646,16 @@ class Simpl(nn.Module):
 
     def post_process(self, out):
         post_out = dict()
-        res_cls = out[0]
-        res_reg = out[1]
+
+        # Handle RL mode output
+        if self.use_rl:
+            traj_out, values = out
+            res_cls = traj_out[0]
+            res_reg = traj_out[1]
+            post_out['values'] = values
+        else:
+            res_cls = out[0]
+            res_reg = out[1]
 
         # get prediction results for target vehicles only
         reg = torch.stack([trajs[0] for trajs in res_reg], dim=0)
